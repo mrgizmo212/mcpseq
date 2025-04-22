@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
+import express, { Request, Response } from "express";
+import morgan from "morgan";
+import { z } from "zod";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -9,6 +13,18 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 // Fixed chalk import for ESM
 import chalk from "chalk";
+
+// Configuration schema with auth options
+const ConfigSchema = z
+  .object({
+    sse_addr: z
+      .string()
+      .trim()
+      .optional()
+      .describe("Address for SSE server (optional)"),
+  });
+
+type ServerConfig = z.infer<typeof ConfigSchema>;
 
 interface ThoughtData {
   thought: string;
@@ -290,10 +306,58 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   };
 });
 
+async function create_sse_server(server: any) {
+  const app = express();
+
+  // Use morgan to log every request
+  app.use(morgan("combined"));
+
+  const transports: { [sessionId: string]: SSEServerTransport } = {};
+
+  app.get("/sse", async (_: Request, res: Response) => {
+    const transport = new SSEServerTransport("/messages", res);
+    transports[transport.sessionId] = transport;
+    res.on("close", () => {
+      delete transports[transport.sessionId];
+    });
+    await server.connect(transport);
+  });
+
+  app.post("/messages", async (req: Request, res: Response) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = transports[sessionId];
+    if (transport) {
+      await transport.handlePostMessage(req, res);
+    } else {
+      res.status(400).send("No transport found for sessionId");
+    }
+  });
+
+  const sseAddr = process.env.SSE_ADDR || "127.0.0.1:3000";
+  const [host, port] = sseAddr.split(":");
+  if (!port) {
+    console.error("Invalid SSE_ADDR format. Expected 'host:port'.");
+    process.exit(1);
+  }
+
+  app.listen(Number(port), host, () => {
+    console.info(`SSE server started on: ${host}:${port}`);
+  });
+}
+
 async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Sequential Thinking MCP Server running on stdio");
+  if (process.env.SSE_ADDR) {
+    await create_sse_server(server);
+  } else {
+    const transport = new StdioServerTransport();
+    console.info("SSE server started on stdio");
+    await server.connect(transport);
+
+    process.on("SIGINT", async () => {
+      await server.close();
+      process.exit(0);
+    });
+  }
 }
 
 runServer().catch((error) => {
