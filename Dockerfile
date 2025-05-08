@@ -2,12 +2,15 @@ FROM node:20-alpine
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci            # installs dev & prod deps
 
 COPY . .
 
-# Build TS -> JS
-RUN npm run build          # assumes "build": "tsc"
+# Compile TypeScript -> dist/…
+RUN npm run build     # assumes "build": "tsc"
 
-EXPOSE 3000                # same port everywhere
+# ── critical line ──
+ENV SSE_ADDR=0.0.0.0:3000   # tells the server to start in SSE mode
+
+EXPOSE 3000
 CMD ["node", "dist/index.js"]
